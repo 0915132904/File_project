@@ -1,0 +1,54 @@
+with table_row as (
+
+select `Đơn hàng` , substring_index(`Sản phẩm`, ' ', 3) as product, `Số đơn hàng`,  `Số lượng`
+, row_number () over (partition by `Đơn hàng` ) as row_num
+from Socom.du_lieu_gio_hang dlgh 
+where `Sản phẩm` not like ('[QUÀ TẶNG]%') and `Sản phẩm` not like ('--')) 
+ 
+-- select row_num
+-- , count(`Số đơn hàng`)
+-- from table_row
+-- group by row_num, khách hàng mua 1 sản phẩm là nhiều nhất, sau đó ta sẽ lấy ra 5 trong số 18 sản phẩm bán kèm nhiều nhất bằng hàm row_number
+
+-- select sum(`Số đơn hàng`)
+-- from table_row
+-- Result: total_order_product: 4104, có tất cả 4104 đơn hàng sản phẩm được order
+
+, table_anteprecedent as (
+	select  distinct product as product_antecedent, `Đơn hàng`, `Số đơn hàng`
+	, count(`Số đơn hàng`) over (partition by product) as num_pro_ante
+	from table_row
+	where row_num = '1'
+	)
+
+, table_consequent as (
+	select distinct product as Product_consequent, `Đơn hàng`, `Số đơn hàng`
+	, count(`Số đơn hàng`) over (partition by product) as num_pro_cons
+	from table_row
+	where row_num > '1' and row_num <= '5')
+
+, table_basket as (
+	select product_antecedent, num_pro_ante, Product_consequent, num_pro_cons
+	, concat(product_antecedent, '-', Product_consequent) as basket
+	, count(ante.`Số đơn hàng`) over (partition by product_antecedent, Product_consequent ) as num_basket
+	from table_anteprecedent as ante
+	left join table_consequent as cons
+	on ante.`Đơn hàng` = cons.`Đơn hàng`
+	where product_antecedent != Product_consequent)
+	
+, table_distinct as ( 
+	select product_antecedent, num_pro_ante, Product_consequent, num_pro_cons, basket, num_basket
+	, row_number() over (partition by product_antecedent, Product_consequent) as distinct_cons
+	from table_basket )
+
+, table_total as (
+select product_antecedent, num_pro_ante, Product_consequent, num_pro_cons, basket, num_basket, '4104' as total_order_pro
+from table_distinct
+where distinct_cons ='1') 
+
+-- Tính các chỉ số: Support, confidence, lift để coi các cặp sản phẩm nào đi cùng nhau tốt nhất
+select product_antecedent, num_pro_ante, Product_consequent, num_pro_cons, basket, num_basket, total_order_pro
+, concat(round((cast(num_basket as decimal) / total_order_pro) * 100, 2), '%') as Support
+, concat(round((cast(num_basket as decimal) / num_pro_ante) * 100, 2), '%') as Confidence
+, round((cast(num_basket as decimal) / num_pro_ante) / (cast(num_pro_cons as decimal) /  total_order_pro), 2) as Lift
+from table_total
