@@ -1,0 +1,33 @@
+with table_join as (
+	select cus_reg.id as customer_id, ID as transaction_id, Purchase_date, GMV as amount, created_date
+	, DATEDIFF('2022-09-01', created_date ) / 365  as age_cus
+	from project1.customer_registered as cus_reg
+	join project1.customer_transaction as cus_trans 
+	on cus_reg.id = cus_trans.CustomerID
+	where cus_reg.id != 0 and GMV != 0
+
+-- , table_RFM as (
+	select customer_id
+	, DATEDIFF( '2022-09-01', MAX(Purchase_date) ) as recency
+	, count(Purchase_date) as frequency
+	, sum(amount)  as monetary
+	from table_join 
+	group by customer_id )
+
+, table_RFM_normalized as (
+	select recency, frequency, monetary, age_cus, table_RFM.customer_id
+    , round (frequency / cast(age_cus as decimal(10,3)) , 3 ) as frequency_normarlize
+    ,  (monetary / age_cus ) as monetary_nomarlized
+	from table_RFM 
+	left join table_join 
+	on table_RFM.customer_id = table_join.customer_id ) 
+
+	, table_percent_rank as (
+	select recency, frequency_normarlize, monetary_nomarlized, customer_id
+	, PERCENT_RANK() over (order by recency asc) as R_rank
+	, PERCENT_RANK() over (order by frequency_normarlize DESC) as F_rank
+	, PERCENT_RANK() over (order by monetary_nomarlized DESC) as M_rank
+	from table_RFM_normalized )
+	
+	select *
+	from table_percent_rank;
