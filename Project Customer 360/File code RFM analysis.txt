@@ -1,23 +1,23 @@
 with table_join as (
-	select cus_reg.id as customer_id, ID as transaction_id, Purchase_date, GMV as amount, created_date
-	, DATEDIFF('2022-09-01', created_date ) / 365  as age_cus
-	from project1.customer_registered as cus_reg
-	join project1.customer_transaction as cus_trans 
+	select cus_reg.id as customer_id, cus_trans.ID as transaction_id, Purchase_date, GMV as amount, created_date
+	, DATEDIFF(year, created_date, '2022-09-01' )  as age_cus
+	from dbo.customer_registered cus_reg
+	join dbo.customer_transaction cus_trans 
 	on cus_reg.id = cus_trans.CustomerID
-	where cus_reg.id != 0 and GMV != 0
+	where cus_reg.id != 0 and GMV != 0 and created_date != 0)
 
--- , table_RFM as (
+, table_RFM as (
 	select customer_id
-	, DATEDIFF( '2022-09-01', MAX(Purchase_date) ) as recency
-	, count(Purchase_date) as frequency
-	, sum(amount)  as monetary
+	, datediff(day, MAX(Purchase_date), '2022-09-01' ) as recency
+	, count (Purchase_date) as frequency
+	, sum (amount)  as monetary
 	from table_join 
 	group by customer_id )
 
 , table_RFM_normalized as (
 	select recency, frequency, monetary, age_cus, table_RFM.customer_id
-    , round (frequency / cast(age_cus as decimal(10,3)) , 3 ) as frequency_normarlize
-    ,  (monetary / age_cus ) as monetary_nomarlized
+	, round (cast (frequency as decimal) / age_cus , 3 ) as frequency_normarlize
+	,  (monetary / age_cus ) as monetary_nomarlized
 	from table_RFM 
 	left join table_join 
 	on table_RFM.customer_id = table_join.customer_id ) 
@@ -28,6 +28,39 @@ with table_join as (
 	, PERCENT_RANK() over (order by frequency_normarlize DESC) as F_rank
 	, PERCENT_RANK() over (order by monetary_nomarlized DESC) as M_rank
 	from table_RFM_normalized )
+
+, table_tier as (
+	select customer_id, recency, frequency_normarlize, monetary_nomarlized
+	, (case when R_rank <= 0.25 THEN 4 when R_rank <= 0.5 THEN 3 when R_rank <= 0.75 THEN 2 ELSE 1 END) as R_tier
+	, (case when F_rank <= 0.25 THEN 1 when F_rank <= 0.5 THEN 2 when F_rank <= 0.75 THEN 3 ELSE 4 END) as F_tier
+	, (case when M_rank <= 0.25 THEN 1 when M_rank <= 0.5 THEN 2 when M_rank <= 0.75 THEN 3 ELSE 4 END) as M_tier
+	from table_percent_rank  )
+
+,  table_segmentation as (
+	select *
+	, CONCAT(R_tier, F_tier, M_tier) as RFM_tier
+	, CASE when CONCAT(R_tier, F_tier, M_tier) IN (343, 333, 433, 443, 434, 444, 344, 334) then 'VIP'
+	when CONCAT(R_tier, F_tier, M_tier) IN (422, 332, 423, 323, 313, 413, 233, 424, 324, 224, 244, 234, 314, 414) then 'Loyalty customer' 
+	when CONCAT(R_tier, F_tier, M_tier) IN (222, 322, 442, 242, 342, 432, 232, 223, 243, 341, 441) then 'Potential customer'
+	ELSE 'Bad customer'
+	end as segmentation
+	from table_tier )
 	
 	select *
-	from table_percent_rank;
+	from table_segmentation
+
+select *
+from table_segmentation
+
+	SELECT segmentation
+	, count(DISTINCT customer_id) as total_customer
+	, sum(monetary_nomarlized) as total_monetary
+	from table_segmentation
+	group by segmentation
+	order by segmentation desc
+	
+
+	
+	
+
+
