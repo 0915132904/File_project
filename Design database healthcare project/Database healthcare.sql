@@ -192,25 +192,9 @@ VALUES
 (11, 7, 5, 7, '2024-09-02', '2024-09-11', 'Pending', '2024-08-30', 'Busy', 3, 4),
 (12, 1, 7, 1, '2024-11-02', '2024-11-12', 'Pending', '2024-11-02', NULL, 2, 2);
 
-select *
-from Insurance
-
-select *
-from Room as R
-LEFT JOIN Department as D
-ON R.DepartmentID = D.DeparmentID
 
 
-ALTER TABLE Customer
-ALTER COLUMN Phone varchar(50);
-
-Select * 
-from Hospitalization
-
-EXEC sp_rename 'dbo.Insurance.CustomerID', 'PatientID', 'COLUMN';
-
-select *
-from Patient
+---- Analyzing for this data
 
 
 
