@@ -1,0 +1,224 @@
+--- Store Procedure for each table
+
+CREATE OR REPLACE PROCEDURE SYNC_ALL_TABLES()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+
+    -- 1. Detect INSERT
+    INSERT INTO SALES_ORIGINAL.SalesReason
+    SELECT
+    s."SalesReasonID",
+    s."Name",
+    s."ReasonType",
+    s."ModifiedDate",
+    TRUE AS Is_Insert,
+    FALSE AS Is_Update,
+    FALSE AS Is_Delete,
+    CURRENT_TIMESTAMP AS Start_Date,
+    NULL AS End_Date,
+    TRUE AS Is_Current
+    FROM SALES.SalesReason s
+    LEFT JOIN SALES_ORIGINAL.SalesReason o
+    ON s."SalesReasonID" = o.SalesReasonID
+    AND o.Is_Current = TRUE
+    WHERE o.SalesReasonID IS NULL;
+    
+    -- 2. Detect UPDATE
+
+    -- Dòng mới update
+    INSERT INTO SALES_ORIGINAL.SalesReason
+    SELECT
+    s."SalesReasonID",
+    s."Name",
+    s."ReasonType",
+    s."ModifiedDate",
+    FALSE AS Is_Insert,
+    TRUE AS Is_Update,
+    FALSE AS Is_Delete,
+    CURRENT_TIMESTAMP AS Start_Date,
+    NULL AS End_Date,
+    TRUE AS Is_Current
+    FROM SALES.SalesReason as s
+    JOIN SALES_ORIGINAL.SalesReason as o
+    ON s."SalesReasonID" = o.SalesReasonID
+    AND o.Is_Current = TRUE
+    WHERE s."Name" IS DISTINCT FROM o."Name"
+       OR s."ReasonType" IS DISTINCT FROM o.ReasonType
+       OR s."ModifiedDate" IS DISTINCT FROM o.ModifiedDate;
+    
+    -- Cập nhật dòng cũ
+    UPDATE SALES_ORIGINAL.SalesReason o
+    SET End_Date = CURRENT_TIMESTAMP,
+        Is_Current = FALSE
+    FROM SALES.SalesReason s
+    WHERE o.SalesReasonID = s."SalesReasonID"
+      AND o.Is_Current = TRUE
+      AND (
+          s."Name" IS DISTINCT FROM o."Name"
+       OR s."ReasonType" IS DISTINCT FROM o.ReasonType
+       OR s."ModifiedDate" IS DISTINCT FROM o.ModifiedDate
+      );
+    
+    -- 3. Detect DELETE
+    
+    -- Dòng mới ghi nhận Delete
+    INSERT INTO SALES_ORIGINAL.SalesReason
+    SELECT
+    o.SalesReasonID,
+    o."Name",
+    o.ReasonType,
+    o.ModifiedDate,
+    FALSE AS Is_Insert,
+    FALSE AS Is_Update,
+    TRUE AS Is_Delete,
+    CURRENT_TIMESTAMP AS Start_Date,
+    NULL AS End_Date,
+    TRUE AS Is_Current
+    FROM SALES_ORIGINAL.SalesReason o
+    LEFT JOIN SALES.SalesReason s
+    ON s."SalesReasonID" = o.SalesReasonID
+    WHERE s."SalesReasonID" IS NULL
+    AND o.Is_Current = TRUE AND o.Is_Delete = FALSE;
+    
+    -- Đánh dấu dòng cũ là hết hiệu lực
+    UPDATE SALES_ORIGINAL.SalesReason
+    SET
+    End_Date = CURRENT_TIMESTAMP,
+    Is_Current = FALSE
+    WHERE SalesReasonID IN (
+    SELECT o.SalesReasonID
+    FROM SALES_ORIGINAL.SalesReason o
+    LEFT JOIN SALES.SalesReason s
+    ON s."SalesReasonID" = o.SalesReasonID
+    WHERE s."SalesReasonID" IS NULL
+    AND o.Is_Current = TRUE
+    );
+
+    ---- Bảng Sales.Territoty
+    -- 1. Detect INSERT
+    INSERT INTO SALES_ORIGINAL.creditcard
+    SELECT
+    sales_cre."CreditCardID",
+    sales_cre."CardType",
+    sales_cre."CardNumber",
+    sales_cre."ExpMonth",
+    sales_cre."ExpYear",
+    sales_cre."ModifiedDate",
+    TRUE AS Is_Insert,
+    FALSE AS Is_Update,
+    FALSE AS Is_Delete,
+    CURRENT_TIMESTAMP AS Start_Date,
+    NULL AS End_Date,
+    TRUE AS Is_Current
+    FROM SALES.creditcard as sales_cre
+    LEFT JOIN SALES_ORIGINAL.creditcard as sales_ori
+    ON sales_cre."CreditCardID" = sales_ori."CreditCardID"
+    AND sales_ori.Is_Current = TRUE
+    WHERE sales_ori."CreditCardID" IS NULL;
+    
+    -- 2. Detect UPDATE
+    
+    -- Dòng mới update
+    INSERT INTO SALES_ORIGINAL.creditcard
+    SELECT
+        s."CreditCardID",
+        s."CardType",
+        s."CardNumber",
+        s."ExpMonth",
+        s."ExpYear",
+        s."ModifiedDate",
+        FALSE AS Is_Insert,
+        TRUE AS Is_Update,
+        FALSE AS Is_Delete,
+        CURRENT_TIMESTAMP AS Start_Date,
+        NULL AS End_Date,
+        TRUE AS Is_Current
+    FROM SALES.creditcard AS s
+    JOIN SALES_ORIGINAL.creditcard AS o
+        ON s."CreditCardID" = o."CreditCardID"
+        AND o.Is_Current = TRUE
+    WHERE s."CardType" IS DISTINCT FROM o."CardType"
+       OR s."CardNumber" IS DISTINCT FROM o."CardNumber"
+       OR s."ExpMonth" IS DISTINCT FROM o."ExpMonth"
+       OR s."ExpYear" IS DISTINCT FROM o."ExpYear"
+       OR s."ModifiedDate" IS DISTINCT FROM o."ModifiedDate";
+    
+        
+    -- Cập nhật dòng cũ thành không còn hiệu lực
+    UPDATE SALES_ORIGINAL.creditcard AS o
+    SET End_Date = CURRENT_TIMESTAMP,
+        Is_Current = FALSE
+    FROM SALES.creditcard AS s
+    WHERE o."CreditCardID" = s."CreditCardID"
+      AND o.Is_Current = TRUE
+      AND (
+           s."CardType" IS DISTINCT FROM o."CardType"
+        OR s."CardNumber" IS DISTINCT FROM o."CardNumber"
+        OR s."ExpMonth" IS DISTINCT FROM o."ExpMonth"
+        OR s."ExpYear" IS DISTINCT FROM o."ExpYear"
+        OR s."ModifiedDate" IS DISTINCT FROM o."ModifiedDate"
+      );
+        
+        -- 3. Detect DELETE
+        
+    -- Dòng mới ghi nhận Delete
+    INSERT INTO SALES_ORIGINAL.creditcard
+    SELECT
+        o."CreditCardID",
+        o."CardType",
+        o."CardNumber",
+        o."ExpMonth",
+        o."ExpYear",
+        o."ModifiedDate",
+        FALSE AS Is_Insert,
+        FALSE AS Is_Update,
+        TRUE AS Is_Delete,
+        CURRENT_TIMESTAMP AS Start_Date,
+        NULL AS End_Date,
+        TRUE AS Is_Current
+    FROM SALES_ORIGINAL.creditcard AS o
+    LEFT JOIN SALES.creditcard AS s
+        ON s."CreditCardID" = o."CreditCardID"
+    WHERE s."CreditCardID" IS NULL
+      AND o.Is_Current = TRUE
+      AND o.Is_Delete = FALSE;
+        
+    -- Đánh dấu dòng cũ là hết hiệu lực (đã bị delete)
+    UPDATE SALES_ORIGINAL.creditcard
+    SET End_Date = CURRENT_TIMESTAMP,
+        Is_Current = FALSE
+    WHERE "CreditCardID" IN (
+        SELECT o."CreditCardID"
+        FROM SALES_ORIGINAL.creditcard AS o
+        LEFT JOIN SALES.creditcard AS s
+            ON s."CreditCardID" = o."CreditCardID"
+        WHERE s."CreditCardID" IS NULL
+          AND o.Is_Current = TRUE
+    );
+    --------------
+    
+  RETURN 'Sync completed for all tables';
+
+END;
+$$;
+
+---- Task refresh 8h tối mỗi ngày
+CALL SYNC_ALL_TABLES();
+
+CREATE OR REPLACE TASK PERSON_TRANS_COUNTRY_DTB.PUBLIC.sync_all_tables_task
+  WAREHOUSE = DATA_WAREHOUSE_DEMO
+  SCHEDULE = 'USING CRON 0 8 * * * Asia/Ho_Chi_Minh'
+  COMMENT = 'Daily run of SYNC_ALL_TABLES at 8AM Asia/Ho_Chi_Minh'
+AS
+  CALL PERSON_TRANS_COUNTRY_DTB.PUBLIC.SYNC_ALL_TABLES();
+
+ALTER TASK PERSON_TRANS_COUNTRY_DTB.PUBLIC.sync_all_tables_task RESUME;
+
+---- show task
+SHOW TASKS IN SCHEMA PERSON_TRANS_COUNTRY_DTB.PUBLIC;
+
+
+
