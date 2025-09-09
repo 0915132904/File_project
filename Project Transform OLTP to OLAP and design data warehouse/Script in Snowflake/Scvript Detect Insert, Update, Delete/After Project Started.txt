@@ -1,0 +1,306 @@
+ALTER ACCOUNT SET TIMEZONE = 'Asia/Ho_Chi_Minh';
+SHOW PARAMETERS LIKE 'TIMEZONE';
+----------------------
+CREATE OR REPLACE PROCEDURE DYNAMIC_SYNC_Test (
+    SOURCE_SCHEMA STRING,
+    TARGET_SCHEMA STRING,
+    TABLE_NAME STRING,
+    KEY_COLUMN STRING,
+    COMPARE_COLUMNS ARRAY
+)
+RETURNS STRING
+LANGUAGE JAVASCRIPT
+AS
+$$
+var col_list = COMPARE_COLUMNS.map(col => `${col}`).join(', ');
+var col_list_s = COMPARE_COLUMNS.map(col => `s.${col}`).join(', ');
+var col_list_o = COMPARE_COLUMNS.map(col => `o.${col}`).join(', ');
+var compare_cond = COMPARE_COLUMNS.map(col => `s.${col} IS DISTINCT FROM o.${col}`).join(' OR ');
+
+// Set start_time = current timestamp
+var result = snowflake.execute({sqlText: `SELECT CURRENT_TIMESTAMP AS ts`});
+result.next();
+var raw_ts = result.getColumnValue("TS");
+var start_time = raw_ts.toISOString().replace('T', ' ').substring(0, 19);
+
+// 1. INSERT mới
+var sql_insert = `
+    INSERT INTO ${TARGET_SCHEMA}.${TABLE_NAME} (
+        ${KEY_COLUMN},
+        ${col_list},
+        ModifiedDate,
+        IsInsert, IsUpdate, IsDelete, IsCurrent, StartDate, EndDate
+    )
+    SELECT
+        s.${KEY_COLUMN},
+        ${col_list_s},
+        s.ModifiedDate,
+        TRUE, FALSE, FALSE, TRUE,
+        s.ModifiedDate, '9999-12-31 00:00:00'
+    FROM ${SOURCE_SCHEMA}.${TABLE_NAME} s
+    LEFT JOIN ${TARGET_SCHEMA}.${TABLE_NAME} o
+        ON s.${KEY_COLUMN} = o.${KEY_COLUMN} AND o.IsCurrent = TRUE
+    WHERE o.${KEY_COLUMN} IS NULL;
+`;
+
+// 2. INSERT dòng mới cập nhật
+var sql_update_new = `
+    INSERT INTO ${TARGET_SCHEMA}.${TABLE_NAME} (
+        ${KEY_COLUMN},
+        ${col_list},
+        ModifiedDate,
+        IsInsert, IsUpdate, IsDelete, IsCurrent, StartDate, EndDate
+    )
+    SELECT
+        s.${KEY_COLUMN},
+        ${col_list_s},
+        s.ModifiedDate,
+        FALSE, TRUE, FALSE, TRUE,
+        s.ModifiedDate, '9999-12-31 00:00:00'
+    FROM ${SOURCE_SCHEMA}.${TABLE_NAME} s
+    JOIN ${TARGET_SCHEMA}.${TABLE_NAME} o
+        ON s.${KEY_COLUMN} = o.${KEY_COLUMN}
+    WHERE o.IsCurrent = TRUE AND (${compare_cond});
+`;
+
+// 2b. UPDATE dòng cũ bị cập nhật
+var sql_update_old = `
+    UPDATE ${TARGET_SCHEMA}.${TABLE_NAME} o
+    SET EndDate = s.ModifiedDate,
+        IsCurrent = FALSE
+    FROM ${SOURCE_SCHEMA}.${TABLE_NAME} s
+    WHERE o.${KEY_COLUMN} = s.${KEY_COLUMN}
+        AND o.IsCurrent = TRUE
+        AND (${compare_cond});
+`;
+
+// 3. INSERT dòng bị xóa
+var sql_delete = `
+    INSERT INTO ${TARGET_SCHEMA}.${TABLE_NAME} (
+        ${KEY_COLUMN},
+        ${col_list},
+        ModifiedDate,
+        IsInsert, IsUpdate, IsDelete, IsCurrent, StartDate, EndDate
+    )
+    SELECT
+        o.${KEY_COLUMN},
+        ${col_list_o},
+        o.ModifiedDate,
+        FALSE, FALSE, TRUE, TRUE,
+        '${start_time}', '9999-12-31 00:00:00'
+    FROM ${TARGET_SCHEMA}.${TABLE_NAME} o
+    LEFT JOIN ${SOURCE_SCHEMA}.${TABLE_NAME} s
+        ON s.${KEY_COLUMN} = o.${KEY_COLUMN}
+    WHERE s.${KEY_COLUMN} IS NULL
+        AND o.IsCurrent = TRUE AND o.IsDelete = FALSE;
+`;
+
+// 3b. UPDATE dòng cũ bị xóa
+var sql_delete_old = `
+    UPDATE ${TARGET_SCHEMA}.${TABLE_NAME}
+    SET EndDate = '${start_time}',
+        IsCurrent = FALSE
+    WHERE ${KEY_COLUMN} IN (
+        SELECT o.${KEY_COLUMN}
+        FROM ${TARGET_SCHEMA}.${TABLE_NAME} o
+        LEFT JOIN ${SOURCE_SCHEMA}.${TABLE_NAME} s
+            ON s.${KEY_COLUMN} = o.${KEY_COLUMN}
+        WHERE s.${KEY_COLUMN} IS NULL
+            AND o.IsCurrent = TRUE
+    );
+`;
+
+// Thực thi
+snowflake.execute({sqlText: sql_insert});
+snowflake.execute({sqlText: sql_update_new});
+snowflake.execute({sqlText: sql_update_old});
+snowflake.execute({sqlText: sql_delete});
+snowflake.execute({sqlText: sql_delete_old});
+
+return `Sync completed for table: ${TABLE_NAME} at ${start_time}`;
+$$;
+
+--- SalesReason 
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'SalesReason',
+    'SalesReasonID',
+    ARRAY_CONSTRUCT('Name', 'ReasonType')
+);
+
+select * from Sales.SalesReason;
+select * from Sales_Temp.SalesReason;
+
+--- CreditCard 
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'CreditCard',
+    'CreditCardID',
+    ARRAY_CONSTRUCT('CardType', 'CardNumber', 'ExpMonth', 'ExpYear')
+);
+
+
+select * 
+from Sales.CreditCard
+where cardtype ='Visa gold'
+select * 
+from Sales_Temp.CreditCard
+
+-- Currency
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'Currency',
+    'CurrencyCode',
+    ARRAY_CONSTRUCT('Name')
+);
+
+
+select * from sales.currency;
+
+
+-- CurrencyRate
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'CurrencyRate',
+    'CurrencyRateID',
+    ARRAY_CONSTRUCT('CurrencyRateDate', 'FromCurrencyCode', 'ToCurrencyCode', 'AverageRate', 'EndofDayRate')
+);
+
+select * 
+from Sales.CurrencyRate
+
+-- PersonCreditCard
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'PersonCreditCard',
+    'BusinessEntityID',
+    ARRAY_CONSTRUCT('CreditCardID')
+);
+
+select *
+from Sales.PersonCreditCard
+
+-- SalesOrderDetail
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'SalesOrderDetail',
+    'SalesOrderDetailID',
+    ARRAY_CONSTRUCT(
+        'SalesOrderID',
+        'CarrierTrackingNumber',
+        'OrderQty',
+        'ProductID',
+        'SpecialOfferID',
+        'UnitPrice',
+        'UnitPriceDiscount',
+        'LineTotal',
+        'Rowguid'
+    )
+);
+
+select *
+from Sales.SalesOrderDetail
+
+-- SalesOrderHeader
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'SalesOrderHeader',
+    'SalesOrderID',
+    ARRAY_CONSTRUCT(
+        'RevisionNumber',
+        'OrderDate',
+        'DueDate',
+        'ShipDate',
+        'Status',
+        'OnlineOrderFlag',
+        'SalesOrderNumber',
+        'PurchaseOrderNumber',
+        'AccountNumber',
+        'CustomerID',
+        'SalesPersonID',
+        'TerritoryID',
+        'BillToAddressID',
+        'ShipToAddressID',
+        'ShipMethodID',
+        'CreditCardID',
+        'CreditCardApprovalCode',
+        'CurrencyRateID',
+        'SubTotal',
+        'TaxAmt',
+        'Freight',
+        'TotalDue',
+        'Comment',
+        'Rowguid'
+    )
+);
+-- Customer 
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'Customer',
+    'CustomerID',
+    ARRAY_CONSTRUCT(
+        'PersonID',
+        'StoreID',
+        'TerritoryID',
+        'AccountNumber',
+        'RowguID'
+    )
+);
+
+
+select *
+from sales.customer
+
+ALTER ACCOUNT SET TIMEZONE = 'Asia/Ho_Chi_Minh';
+SHOW PARAMETERS LIKE 'TIMEZONE';
+-- SalesPerson
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'SalesPerson',
+    'BusinessEntityID',
+    ARRAY_CONSTRUCT(
+        'TerritoryID',
+        'SalesQuota',
+        'Bonus',
+        'CommissionPct',
+        'SalesYTD',
+        'SalesLastYear',
+        'RowguID'
+        )
+);
+
+select *
+from Sales.SalesPerson
+select *
+from sales_temp.SalesPerson
+
+-- SalesTerritory
+CALL DYNAMIC_SYNC_Test(
+    'Sales_Temp',
+    'Sales',
+    'SalesTerritory',
+    'TerritoryID',
+    ARRAY_CONSTRUCT(
+        'Name',
+        'CountryRegionCode',
+        '"Group"',
+        'SalesYTD',
+        'SalesLastYear',
+        'CostYTD',
+        'CostLastYear',
+        'Rowguid'
+    )
+);
+
+select *
+from sales.SalesTerritory
+-- 
