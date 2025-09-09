@@ -1,0 +1,389 @@
+CREATE OR REPLACE PROCEDURE SP_CREATE_DWH_TABLES()
+RETURNS STRING
+LANGUAGE JAVASCRIPT
+AS
+$$
+var sql_commands = [
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimCustomer (
+            CustomerKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            CustomerID NUMBER(8,0),
+            StoreID NUMBER(8,0),
+            TerritoryKey NUMBER(8,0),
+            AccountNumber VARCHAR(50),
+            CustomerModifiedDate TIMESTAMP_NTZ(3),
+            StoreName VARCHAR(100),
+            StoreModifiedDate TIMESTAMP_NTZ(3),
+            StoreCategory VARCHAR(50),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimTerritory (
+            TerritoryKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            TerritoryID NUMBER(8,0),
+            RegionName VARCHAR(100),
+            RegionCode VARCHAR(10),
+            GroupName VARCHAR(50),
+            SalesYTD NUMBER(8,0),
+            SalesLastYear NUMBER(8,0),
+            CostYTD NUMBER(8,0),
+            CostLastYear NUMBER(8,0),
+            TerriModifiedDate TIMESTAMP_NTZ(3),
+            SalesGrowthTrend VARCHAR(20),
+            CostTrend VARCHAR(20),
+            EstimatedProfit NUMBER(8,0),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimCreditCard (
+            CreditCardKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            CreditCardID CHAR(25),
+            CardType VARCHAR(20),
+            CardNumber VARCHAR(25),
+            ExpMonth NUMBER(2,0),
+            ExpYear NUMBER(4,0),
+            MonthExpiration NUMBER(4,0),
+            CardStatus VARCHAR(10),
+            Expiring3Months VARCHAR(10),
+            CreditModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimSalesPerson (
+            SalesPersonKey NUMBER AUTOINCREMENT PRIMARY KEY,
+            BusinessEntityID NUMBER(7,0),
+            TerritoryID NUMBER(10,2), 
+            TerritoryKey NUMBER(10,2),
+            SalesQuota NUMBER(10,2), 
+            Bonus NUMBER(10,2), 
+            CommissionPCT NUMBER(10,2), 
+            SalesYTD NUMBER(10,2), 
+            SalesLastYear NUMBER(10,2), 
+            SalesPersonModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+        )`,
+
+        `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimStore (
+            StoreKey NUMBER AUTOINCREMENT PRIMARY KEY,
+            BusinessEntityID NUMBER(7,0), 
+            StoreName VARCHAR(41),
+            SalesPersonKey NUMBER(7,0),
+            SalesPersonID NUMBER(7,0), 
+            Demographics VARCHAR(430), 
+            RowguID VARCHAR(36), 
+            StoreModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+            )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimCurrency (
+            CurrencyRateKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            CurrencyRateID NUMBER(8,0),
+            CurrencyRateDate DATE,
+            FromCurrencyCode VARCHAR(3),
+            ToCurrencyCode VARCHAR(3),
+            ToCurrencyName VARCHAR(100),
+            CurrencyRateModifiedDate TIMESTAMP_NTZ(3),
+            CurrencyModifiedDate TIMESTAMP_NTZ(3),
+            AverageRate NUMBER(8,2),
+            EndOfDayRate NUMBER(8,2),
+            RateDiff NUMBER(8,2),
+            RateTrend VARCHAR(10),
+            Year NUMBER(4,0),
+            Month NUMBER(2,0),
+            Quarter NUMBER(1,0),
+            UpTrendCountInMonth NUMBER(6,0),
+            UpTrendCountInQuarter NUMBER(6,0),
+            UpTrendCountInYear NUMBER(6,0),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.FactSalesOrderReason (
+            SalesOrderReasonKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            SalesOrderID NUMBER(8,0),
+            SalesOrderHeaderKey NUMBER(8,0),
+            ReasonName VARCHAR(100),
+            ReasonType VARCHAR(50),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.FactProduct (
+            ProductKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            ProductID NUMBER(8,0),
+            ProductName VARCHAR(200),
+            FinishedGoodsFlag BOOLEAN,
+            Color VARCHAR(30),
+            SafetyStockLevel NUMBER(6,0),
+            ReorderPoint NUMBER(6,0),
+            StandardCost NUMBER(8,0),
+            ListPrice NUMBER(8,0),
+            Size VARCHAR(20),
+            Weight NUMBER(8,0),
+            DaysToManufacture NUMBER(4,0),
+            ProductLine VARCHAR(10),
+            Class VARCHAR(10),
+            Style VARCHAR(10),
+            ProductModifiedDate TIMESTAMP_NTZ(3),
+            SubCateProModifiedDate TIMESTAMP_NTZ(3),
+            CateProModifiedDate TIMESTAMP_NTZ(3),
+            ProductSubcategoryID NUMBER(8,0),
+            ProductCategoryID NUMBER(8,0),
+            CategoryName VARCHAR(100),
+            SellStartDate TIMESTAMP_NTZ(3),
+            SellEndDate TIMESTAMP_NTZ(3),
+            DiscontinuedDate TIMESTAMP_NTZ(3),
+            PriceRankInSubcategory NUMBER(6,0),
+            ProfitMarginPct NUMBER(8,0),
+            TotalProInCate NUMBER(6,0),
+            AvgPriceBySubcategory NUMBER(8,0),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimSpecialOffer (
+            SpecialOfferKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            SpecialOfferID NUMBER(8,0),
+            Description VARCHAR(255),
+            DiscountPCT NUMBER(5,4),
+            Type VARCHAR(50),
+            OfferModifiedDate TIMESTAMP_NTZ(3),
+            Category VARCHAR(50),
+            OfferStartDate DATE,
+            OfferEndDate DATE,
+            MinQTY NUMBER(5,0),
+            MaxQTY NUMBER(5,0),
+            OfferDurationDays NUMBER(5,0),
+            DiscountRankType NUMBER(5,0),
+            DiscountPctContribution VARCHAR(10),
+            OfferStatus VARCHAR(20),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.FactSalesOrderDetail (
+            SalesOrderDetailKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            SalesOrderID NUMBER(8,0),
+            SalesOrderDetailID NUMBER(8,0),
+            CarrierTrackingNumber VARCHAR(50),
+            OrderQty NUMBER(6,0),
+            ProductKey NUMBER(8,0),
+            SpecialOfferKey NUMBER(8,0),
+            SalesOrderHeaderKey NUMBER(8,0),
+            UnitPrice NUMBER(12,4),
+            UnitPriceDiscount NUMBER(12,4),
+            LineTotal NUMBER(18,4),
+            TotalOrderQtyPerOrder NUMBER(10,0),
+            TotalLineTotalPerOrder NUMBER(18,4),
+            ProductRankInOrder NUMBER(5,0),
+            DetailModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimShipMethod (
+            ShipMethodKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            ShipMethodID NUMBER(8,0),
+            ShipMethodName VARCHAR(100),
+            ShipBase NUMBER(10,2),
+            ShipRate NUMBER(10,2),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.FactPurchaseOrderHeader (
+            PurchaseOrderHeaderKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            PurchaseOrderID NUMBER(8,0),
+            RevisionNumber NUMBER(3,0),
+            Status NUMBER(3,0),
+            ShipMethodKey NUMBER(8,0),
+            OrderDate TIMESTAMP_NTZ(3),
+            ShipDate TIMESTAMP_NTZ(3),
+            SubTotal NUMBER(12,2),
+            TaxAmt NUMBER(10,2),
+            Freight NUMBER(10,2),
+            TotalDue NUMBER(12,2),
+            PurchaseModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN
+    )`,
+
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.FactPurchaseOrderDetail (
+            PurchaseOrderDetailKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            PurchaseOrderID NUMBER(8,0),
+            PurchaseOrderDetailID NUMBER(8,0),
+            PurchaseOrderHeaderKey NUMBER(8,0),
+            ProductKey NUMBER(8,0),
+            DueDate DATE,
+            OrderQty NUMBER(8,0),
+            UnitPrice NUMBER(12,2),
+            LineTotal NUMBER(12,2),
+            ReceivedQty NUMBER(8,2),
+            RejectedQty NUMBER(8,2),
+            StockedQty NUMBER(8,2),
+            OrderDetailModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN
+    )`,
+
+
+   `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.FactSalesOrderHeader (
+            SalesOrderHeaderKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY,
+            SalesOrderID NUMBER(8,0),
+            OrderDate DATE,
+            DueDate DATE,
+            ShipDate DATE,
+            StatusOder VARCHAR(25),
+            IsOnline BOOLEAN,
+            PurchaseOrderNumber VARCHAR(50) DEFAULT 'Unknown',
+            SalesOrderNumber VARCHAR(50),
+            CusAccount VARCHAR(20),
+            SalespersonID NUMBER(8,0),
+            CustomerKey NUMBER(8,0),
+            SalesPersonKey NUMBER(8,0),
+            SalesPerExplain VARCHAR(25), 
+            TerritoryKey NUMBER(8,0),
+            CurrencyRateKey NUMBER(8,0),
+            CurrencyExplain VARCHAR(25),
+            CreditCardKey NUMBER(8,0),
+            CreditCardExplain VARCHAR(25),
+            ShipMethodKey NUMBER(8,0),
+            DateKeyOrder NUMBER(8,0),
+            DateKeyDue NUMBER(8,0),
+            DateKeyShip NUMBER(8,0),
+            CreditCardApprovalCode VARCHAR(50) DEFAULT 'Unknown',
+            SubTotal NUMBER(18,4),
+            Tax NUMBER(18,4),
+            ShippingFee NUMBER(18,4),
+            TotalAmount NUMBER(18,4),
+            CumulativeAmount NUMBER(20,4),
+            OrderCount NUMBER(8,0),
+            Recency NUMBER(6,0),
+            Frequency NUMBER(6,0),
+            Monetary NUMBER(18,4),
+            PayMethod VARCHAR(20),
+            FraudStatus VARCHAR(20),
+            SalesHeaderModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN
+            )`,
+            
+    `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimDate (
+            DateKey VARCHAR(50) PRIMARY KEY,
+            FullDate TIMESTAMP_NTZ(3),
+            Day NUMBER(8,0),
+            DayName VARCHAR(25),
+            DayOfWeek NUMBER(8,0),
+            IsWeekend BOOLEAN,
+            WeekOfYear NUMBER(8,0),
+            WeekStartDate DATE,
+            WeekEndDate DATE,
+            Month NUMBER(8,0),
+            MonthName VARCHAR(25),
+            MonthYear VARCHAR(25),
+            Quarter NUMBER(8,0),
+            QuarterName VARCHAR(25),
+            QuarterYear VARCHAR(25),
+            Year NUMBER(8,0),
+            YearHalf NUMBER(8,0),
+            YearMonth NUMBER(8,0),
+            IsHoliday BOOLEAN,
+            IsFirstDayOfMonth BOOLEAN,
+            IsLastDayOfMonth BOOLEAN
+    )`,
+                
+            `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimProductCostHistory (
+            ProductCostHistoryKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY, -- Surrogate Key
+            ProductID NUMBER(8,0),  -- Business Key 1
+            ProductKey NUMBER(8,0),
+            HistoryStartDate DATE,
+            HistoryEndDate DATE,
+            StandardCost NUMBER(18,4),  -- Business Key 2
+            HistoryModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+        )`,
+
+            `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimProductInventory (
+            ProductInventoryKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY, -- Surrogate Key
+            ProductID NUMBER(8,0),   -- Business Key 1
+            ProductKey NUMBER(8,0),
+            LocationID NUMBER(8,0),  -- Business Key 2
+            LocationName VARCHAR(100),
+            CostRate NUMBER(18,4),
+            Availability NUMBER(18,4),
+            LocationModifiedDate TIMESTAMP_NTZ(3),
+            Shelf VARCHAR(10),
+            Bin NUMBER(8,0),
+            Quantity NUMBER(8,0),
+            ProHisModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+        )`,
+        
+            `CREATE OR REPLACE TABLE SALES_PRODUCT_DWH.DimWorkOrderRouting (
+            WorkOrderRoutingKey NUMBER(8,0) AUTOINCREMENT PRIMARY KEY, -- Surrogate Key
+            WorkOrderID NUMBER(8,0),   
+            ProductID NUMBER(8,0),
+            ProductKey NUMBER(8,0),
+            OperationSequence NUMBER(8,0),
+            LocationID NUMBER(8,0),    
+            LocationName VARCHAR(100),
+            CostRate NUMBER(18,4),
+            Availability NUMBER(18,4),
+            LocationModifiedDate TIMESTAMP_NTZ(3),
+            ScheduledStartDate DATE,
+            ScheduledEndDate DATE,
+            ActualStartDate DATE,
+            ActualEndDate DATE,
+            ActualResourceHrs NUMBER(18,4),
+            PlannedCost NUMBER(18,4),
+            ActualCost NUMBER(18,4),
+            RoutingModifiedDate TIMESTAMP_NTZ(3),
+            ScrapReasonName VARCHAR(100),
+            ScrapModifiedDate TIMESTAMP_NTZ(3),
+            IsCurrent BOOLEAN,
+            StartDate TIMESTAMP_NTZ(3),
+            EndDate TIMESTAMP_NTZ(3),
+            HashDiff VARCHAR(64)
+        )`,
+        
+  ];
+
+for (var i = 0; i < sql_commands.length; i++) {
+    snowflake.execute({sqlText: sql_commands[i]});
+}
+
+return 'All tables created successfully.';
+$$;
+
+
+CALL SP_CREATE_DWH_TABLES();
+
+
