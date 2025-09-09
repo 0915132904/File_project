@@ -1,0 +1,1142 @@
+CREATE OR REPLACE PROCEDURE RUN_LOAD_DWH_ETL_NEXT()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+        --- TABLE DIMCREDITCARD LOAD DATA
+        
+        -- STEP 1: TẠO BẢNG TẠM STAGING ĐÃ TÍNH TOÁN (DIMCREDITCARD)
+        CREATE OR REPLACE TEMP TABLE stg_dim_creditcard AS
+        SELECT 
+            CreditCardID,
+            CardType,
+            CardNumber,
+            ExpMonth, 
+            ExpYear,
+            IsCurrent,
+            IsUpdate,
+            (ExpYear * 12 + ExpMonth) - (EXTRACT(YEAR FROM CURRENT_DATE) * 12 + EXTRACT(MONTH FROM CURRENT_DATE)) AS MonthExpiration,
+            CASE 
+                WHEN (ExpYear * 12 + ExpMonth) >= (EXTRACT(YEAR FROM CURRENT_DATE) * 12 + EXTRACT(MONTH FROM CURRENT_DATE)) 
+                    THEN 'Active'
+                ELSE 'Expired'
+            END AS CardStatus,
+            CASE 
+                WHEN (ExpYear * 12 + ExpMonth) - (EXTRACT(YEAR FROM CURRENT_DATE) * 12 + EXTRACT(MONTH FROM CURRENT_DATE)) BETWEEN 0 AND 3 
+                    THEN 'Active'
+                ELSE 'Expired'
+            END AS Expiring3Months,
+            cre.ModifiedDate as CreditModifiedDate,
+            ModifiedDate as StartDate,
+            SHA2(CONCAT_WS('|', 
+                COALESCE(CAST(CreditCardID AS STRING), 'unknown'),
+                COALESCE(CardType, 'unknown'),
+                COALESCE(CardNumber, 'unknown'),
+                COALESCE(CAST(ExpMonth AS STRING), 'unknown'),
+                COALESCE(CAST(ExpYear AS STRING), 'unknown')
+            ), 256) as HashDiff,
+            CASE 
+                WHEN IsDelete THEN TRUE 
+                ELSE FALSE 
+            END AS IsDeleted
+        FROM Sales.CreditCard as cre
+        WHERE IsInsert = TRUE OR IsUpdate = TRUE OR IsDelete = TRUE;
+        
+        -- STEP 2: UPDATE DÒNG CŨ KHI HASH KHÁC
+        UPDATE Sales_Product_DWH.DimCreditCard dwh
+        SET 
+            IsCurrent = FALSE,  
+            EndDate = stg.StartDate
+        FROM stg_dim_creditcard stg
+        WHERE dwh.CreditCardID = stg.CreditCardID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+
+        
+        -- STEP 3: INSERT DỮ LIỆU MỚI (KHÁC HASH VÀ KHÔNG TỒN TẠI)
+        
+            INSERT INTO Sales_Product_DWH.DimCreditCard (
+                CreditCardID,
+                CardType,
+                CardNumber,
+                ExpMonth,
+                ExpYear,
+                MonthExpiration,
+                CardStatus,
+                Expiring3Months,
+                CreditModifiedDate,
+                IsCurrent,
+                StartDate,
+                EndDate,
+                HashDiff
+            )
+            SELECT
+                stg.CreditCardID,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.CardType END,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.CardNumber END,
+                stg.ExpMonth,
+                stg.ExpYear,
+                stg.MonthExpiration,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.CardStatus END,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.Expiring3Months END,
+                stg.CreditModifiedDate,
+                CASE WHEN stg.IsDeleted THEN FALSE ELSE TRUE END,
+                stg.StartDate,
+                TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+                stg.HashDiff
+            FROM stg_dim_creditcard stg
+            LEFT JOIN Sales_Product_DWH.DimCreditCard dim
+              ON stg.CreditCardID = dim.CreditCardID
+             AND dim.IsCurrent = TRUE
+            WHERE (dim.CreditCardID IS NULL OR stg.HashDiff != dim.HashDiff)
+              AND stg.IsCurrent = TRUE;
+              
+        -- STEP 4: CASE DELETE
+            UPDATE Sales_Product_DWH.DimCreditCard AS target
+            SET 
+                target.IsCurrent = FALSE,
+                target.EndDate = staging.StartDate
+            FROM stg_dim_creditcard AS staging
+            WHERE target.CreditCardID = staging.CreditCardID
+              AND staging.IsCurrent = FALSE
+              AND target.IsCurrent = TRUE   
+              AND target.StartDate < staging.StartDate
+              AND target.EndDate = TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD');
+
+
+        -- 0. RAW staging (giữ nguyên logic bạn đã có)
+            CREATE OR REPLACE TEMP TABLE stg_dim_territory_raw AS
+            SELECT 
+                st.TerritoryID,
+                st.Name AS RegionName,
+                st.CountryRegionCode AS RegionCode,
+                st."Group" AS GroupName,
+                st.SalesYTD,
+                st.SalesLastYear,
+                st.CostYTD,
+                st.CostLastYear,
+                st.ModifiedDate AS TerriModifiedDate,
+                CASE 
+                    WHEN st.SalesYTD > st.SalesLastYear THEN 'Growing'
+                    WHEN st.SalesYTD < st.SalesLastYear THEN 'Declining'
+                    ELSE 'Stable'
+                END AS SalesGrowthTrend,
+                CASE 
+                    WHEN st.CostYTD > st.CostLastYear THEN 'Cost Up'
+                    WHEN st.CostYTD < st.CostLastYear THEN 'Cost Down'
+                    ELSE 'Cost Stable'
+                END AS CostTrend,
+                st.SalesYTD - st.CostYTD AS EstimatedProfit,
+                st.ModifiedDate AS StartDate,
+                TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+                -- HashDiff giống như bạn tạo
+                SHA2(TO_JSON(OBJECT_CONSTRUCT_KEEP_NULL(
+                    'TerritoryID', st.TerritoryID,
+                    'RegionName', st.Name,
+                    'RegionCode', st.CountryRegionCode,
+                    'GroupName', st."Group",
+                    'SalesYTD', st.SalesYTD,
+                    'SalesLastYear', st.SalesLastYear,
+                    'CostYTD', st.CostYTD,
+                    'CostLastYear', st.CostLastYear,
+                    'SalesGrowthTrend', 
+                        CASE 
+                            WHEN st.SalesYTD > st.SalesLastYear THEN 'Growing'
+                            WHEN st.SalesYTD < st.SalesLastYear THEN 'Declining'
+                            ELSE 'Stable'
+                        END,
+                    'CostTrend', 
+                        CASE 
+                            WHEN st.CostYTD > st.CostLastYear THEN 'Cost Up'
+                            WHEN st.CostYTD < st.CostLastYear THEN 'Cost Down'
+                            ELSE 'Cost Stable'
+                        END,
+                    'EstimatedProfit', st.SalesYTD - st.CostYTD
+                )), 256) AS HashDiff,
+                CASE WHEN st.IsDelete THEN TRUE ELSE FALSE END AS IsDeleted,
+                CASE WHEN st.IsDelete THEN FALSE ELSE TRUE END AS IsCurrent,
+                st.ModifiedDate as ModifiedDate  -- để dedupe theo modified
+            FROM SALES.SalesTerritory st
+            WHERE st.IsInsert = TRUE OR st.IsUpdate = TRUE OR st.IsDelete = TRUE;
+            
+            
+            -- 1. Deduplicate: chỉ giữ row mới nhất per TerritoryID (VERY IMPORTANT)
+            CREATE OR REPLACE TEMP TABLE stg_dim_territory AS
+            SELECT *
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY TerritoryID ORDER BY ModifiedDate DESC NULLS LAST) AS rn
+                FROM stg_dim_territory_raw
+            )
+            WHERE rn = 1;
+            
+            
+            -- 2. Snapshot current DWH trước khi update (very important)
+            CREATE OR REPLACE TEMP TABLE cur_dim_territory AS
+            SELECT TerritoryID, HashDiff
+            FROM Sales_Product_DWH.DimTerritory
+            WHERE IsCurrent = TRUE;
+            
+            
+            -- 3. UPDATE old records in DWH when HashDiff changed (close old version)
+            UPDATE Sales_Product_DWH.DimTerritory dwh
+            SET 
+                IsCurrent = FALSE,
+                EndDate = stg.StartDate
+            FROM stg_dim_territory stg
+            WHERE dwh.TerritoryID = stg.TerritoryID
+              AND dwh.IsCurrent = TRUE
+              AND dwh.HashDiff != stg.HashDiff
+              AND stg.IsCurrent = TRUE;
+            
+            
+            -- 4. INSERT new records based on SNAPSHOT (compare to cur_dim_territory)
+            INSERT INTO Sales_Product_DWH.DimTerritory (
+                TerritoryID,
+                RegionName,
+                RegionCode,
+                GroupName,
+                SalesYTD,
+                SalesLastYear,
+                CostYTD,
+                CostLastYear,
+                TerriModifiedDate,
+                SalesGrowthTrend,
+                CostTrend,
+                EstimatedProfit,
+                IsCurrent,
+                StartDate,
+                EndDate,
+                HashDiff
+            )
+            SELECT
+                stg.TerritoryID,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.RegionName END,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.RegionCode END,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.GroupName END,
+                stg.SalesYTD,
+                stg.SalesLastYear,
+                stg.CostYTD,
+                stg.CostLastYear,
+                stg.TerriModifiedDate,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.SalesGrowthTrend END,
+                CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.CostTrend END,
+                stg.EstimatedProfit,
+                CASE WHEN stg.IsDeleted THEN FALSE ELSE TRUE END AS IsCurrent,
+                stg.StartDate,
+                TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+                stg.HashDiff
+            FROM stg_dim_territory stg
+            LEFT JOIN cur_dim_territory cur
+                ON stg.TerritoryID = cur.TerritoryID
+            WHERE (cur.TerritoryID IS NULL OR stg.HashDiff != cur.HashDiff)
+              AND stg.IsCurrent = TRUE;
+            
+            
+            -- 5. CASE DELETE: mark old records as expired (safe condition)
+            UPDATE Sales_Product_DWH.DimTerritory AS target
+            SET 
+                target.IsCurrent = FALSE,
+                target.EndDate = staging.StartDate
+            FROM stg_dim_territory AS staging
+            WHERE target.TerritoryID = staging.TerritoryID
+              AND staging.IsCurrent = FALSE    -- staging báo là delete
+              AND target.IsCurrent = TRUE
+              AND target.StartDate < staging.StartDate
+              AND target.EndDate = TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD');
+        
+
+        ------ LOAD DATA FROM Customer + Store (DIMCUSTOMER) -- Check
+
+        -- LOAD DATA DIMCUSTOMER
+        -- 0. RAW staging
+        CREATE OR REPLACE TEMP TABLE stg_dim_customer_raw AS
+        SELECT 
+            cus.CustomerID,
+            cus.StoreID,
+            dt.TerritoryKey,
+            cus.AccountNumber,
+            cus.ModifiedDate AS CustomerModifiedDate,
+            sto.Name AS StoreName,
+            sto.ModifiedDate AS StoreModifiedDate,
+            CASE 
+                WHEN sto.Name ILIKE '%bike%' THEN 'Bike Store'
+                WHEN sto.Name ILIKE '%sport%' THEN 'Sports Store'
+                WHEN sto.Name ILIKE '%cycle%' THEN 'Cycle Store'
+                WHEN sto.Name ILIKE '%department%' THEN 'Department Store'
+                WHEN sto.Name ILIKE '%discount%' THEN 'Discount Store'
+                WHEN sto.Name ILIKE '%delivery%' THEN 'Delivery Service'
+                WHEN sto.Name ILIKE '%parts%' OR sto.Name ILIKE '%suppliers%' THEN 'Parts Supplier'
+                WHEN sto.Name IS NULL THEN 'Unknown'
+                ELSE 'General Store'
+            END AS StoreCategory,
+        
+            COALESCE(GREATEST(cus.ModifiedDate, sto.ModifiedDate),
+                     cus.ModifiedDate, sto.ModifiedDate) AS StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+        
+            -- HashDiff
+            SHA2(TO_VARCHAR(cus.AccountNumber) || '|' ||
+                 TO_VARCHAR(cus.StoreID) || '|' ||
+                 TO_VARCHAR(dt.TerritoryKey) || '|' ||
+                 TO_VARCHAR(sto.Name) || '|' ||
+                 CASE 
+                     WHEN sto.Name ILIKE '%bike%' THEN 'Bike Store'
+                     WHEN sto.Name ILIKE '%sport%' THEN 'Sports Store'
+                     WHEN sto.Name ILIKE '%cycle%' THEN 'Cycle Store'
+                     WHEN sto.Name ILIKE '%department%' THEN 'Department Store'
+                     WHEN sto.Name ILIKE '%discount%' THEN 'Discount Store'
+                     WHEN sto.Name ILIKE '%delivery%' THEN 'Delivery Service'
+                     WHEN sto.Name ILIKE '%parts%' OR sto.Name ILIKE '%suppliers%' THEN 'Parts Supplier'
+                     WHEN sto.Name IS NULL THEN 'Unknown'
+                     ELSE 'General Store'
+                 END
+            , 256) AS HashDiff,
+        
+            -- Flags
+            CASE WHEN cus.IsDelete = TRUE OR sto.IsDelete = TRUE THEN TRUE ELSE FALSE END AS IsDeleted,
+            CASE WHEN cus.IsDelete = TRUE OR sto.IsDelete = TRUE THEN FALSE ELSE TRUE END AS IsCurrent,
+        
+            GREATEST(cus.ModifiedDate, sto.ModifiedDate) AS ModifiedDate
+        
+        FROM SALES.customer AS cus
+        LEFT JOIN SALES.store AS sto
+            ON cus.StoreID = sto.BusinessEntityID
+        LEFT JOIN SALES_PRODUCT_DWH.DimTerritory AS dt
+            ON cus.TerritoryID = dt.TerritoryID
+        WHERE cus.IsInsert = TRUE OR cus.IsUpdate = TRUE OR cus.IsDelete = TRUE
+           OR (sto.IsInsert = TRUE OR sto.IsUpdate = TRUE OR sto.IsDelete = TRUE);
+        
+        -- 1. Deduplicate
+        CREATE OR REPLACE TEMP TABLE stg_dim_customer AS
+        SELECT *
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY CustomerID ORDER BY ModifiedDate DESC NULLS LAST) AS rn
+            FROM stg_dim_customer_raw
+        )
+        WHERE rn = 1;
+        
+        -- 2. Snapshot current DWH
+        CREATE OR REPLACE TEMP TABLE cur_dim_customer AS
+        SELECT CustomerID, HashDiff
+        FROM Sales_Product_DWH.DimCustomer
+        WHERE IsCurrent = TRUE;
+        
+        -- 3. Update old records when changed
+        UPDATE Sales_Product_DWH.DimCustomer dwh
+        SET 
+            IsCurrent = FALSE,
+            EndDate = stg.StartDate
+        FROM stg_dim_customer stg
+        WHERE dwh.CustomerID = stg.CustomerID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+        -- 4. Insert new records
+        INSERT INTO Sales_Product_DWH.DimCustomer (
+            CustomerID,
+            StoreID,
+            TerritoryKey,
+            AccountNumber,
+            CustomerModifiedDate,
+            StoreName,
+            StoreModifiedDate,
+            StoreCategory,
+            IsCurrent,
+            StartDate,
+            EndDate,
+            HashDiff
+        )
+        SELECT
+            stg.CustomerID,
+            stg.StoreID,
+            stg.TerritoryKey,
+            stg.AccountNumber,
+            stg.CustomerModifiedDate,
+            CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.StoreName END,
+            stg.StoreModifiedDate,
+            CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.StoreCategory END,
+            CASE WHEN stg.IsDeleted THEN FALSE ELSE TRUE END AS IsCurrent,
+            stg.StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+            stg.HashDiff
+        FROM stg_dim_customer stg
+        LEFT JOIN cur_dim_customer cur
+            ON stg.CustomerID = cur.CustomerID
+        WHERE (cur.CustomerID IS NULL OR stg.HashDiff != cur.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+        -- 5. Delete case
+        UPDATE Sales_Product_DWH.DimCustomer AS target
+        SET 
+            target.IsCurrent = FALSE,
+            target.EndDate = staging.StartDate
+        FROM stg_dim_customer AS staging
+        WHERE target.IsCurrent = TRUE
+          AND target.CustomerID IN (
+          SELECT CustomerID
+          FROM SALES.Customer
+          WHERE IsDelete = TRUE);
+
+        ------ LOAD DATA FROM SALESPERSON + STORE (DIMSALESPERSON) -- Check
+        
+        -- STEP 0: RAW staging
+        CREATE OR REPLACE TEMP TABLE stg_dim_salesperson_raw AS
+        SELECT 
+            sto.BusinessEntityID,
+            sto.SalespersonID,
+            dt.TerritoryKey,
+            per.territoryid,
+            per.SalesQuota,
+            per.Bonus,
+            per.CommissionPct,
+            per.SalesYTD,
+            per.SalesLastYear,
+            per.ModifiedDate AS PersonModifiedDate,
+            sto.Name AS StoreName,
+            sto.ModifiedDate AS StoreModifiedDate,
+        
+            -- Tính QuotaPct (% vượt chỉ tiêu)
+            CASE 
+                WHEN per.SalesQuota > 0 THEN CONCAT(ROUND(((per.SalesYTD - per.SalesQuota) / per.SalesQuota) * 100, 2), '%')
+                ELSE NULL
+            END AS QuotaPct,
+        
+            -- Tính SalesGrowthPct (% tăng trưởng)
+            CASE 
+                WHEN per.SalesLastYear > 0 THEN CONCAT(ROUND(((per.SalesYTD - per.SalesLastYear) / per.SalesLastYear) * 100, 2), '%') 
+                ELSE NULL
+            END AS SalesGrowthPct,
+        
+            -- Ước tính thu nhập
+            (per.SalesYTD + per.SalesLastYear) * per.CommissionPct + per.Bonus AS EstimatedEarning,
+        
+            COALESCE(GREATEST(per.ModifiedDate, sto.ModifiedDate),
+                     per.ModifiedDate, sto.ModifiedDate) AS StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+        
+            -- Flags
+            CASE WHEN per.IsDelete = TRUE OR sto.IsDelete = TRUE THEN TRUE ELSE FALSE END AS IsDeleted,
+            CASE WHEN per.IsDelete = TRUE OR sto.IsDelete = TRUE THEN FALSE ELSE TRUE END AS IsCurrent,
+        
+            -- HashDiff
+            SHA2(
+                TO_VARCHAR(per.BusinessEntityID) || '|' ||
+                TO_VARCHAR(dt.TerritoryKey) || '|' ||
+                TO_VARCHAR(per.SalesQuota) || '|' ||
+                TO_VARCHAR(per.Bonus) || '|' ||
+                TO_VARCHAR(per.CommissionPct) || '|' ||
+                TO_VARCHAR(per.SalesYTD) || '|' ||
+                TO_VARCHAR(per.SalesLastYear) || '|' ||
+                TO_VARCHAR(sto.Name) || '|' ||
+                TO_VARCHAR(
+                    CASE 
+                        WHEN per.SalesQuota > 0 THEN CONCAT(ROUND(((per.SalesYTD - per.SalesQuota) / per.SalesQuota) * 100, 2), '%')
+                        ELSE NULL
+                    END
+                ) || '|' ||
+                TO_VARCHAR(
+                    CASE 
+                        WHEN per.SalesLastYear > 0 THEN CONCAT(ROUND(((per.SalesYTD - per.SalesLastYear) / per.SalesLastYear) * 100, 2), '%') 
+                        ELSE NULL
+                    END
+                ) || '|' ||
+                TO_VARCHAR((per.SalesYTD + per.SalesLastYear) * per.CommissionPct + per.Bonus)
+            , 256) AS HashDiff
+        
+        FROM SALES.salesperson AS per
+        RIGHT JOIN SALES.store AS sto
+            ON per.BusinessEntityID = sto.SalesPersonID
+        LEFT JOIN SALES_PRODUCT_DWH.DimTerritory AS dt
+            ON per.TerritoryID = dt.TerritoryID
+        WHERE (per.IsInsert = TRUE OR per.IsUpdate = TRUE OR per.IsDelete = TRUE)
+           OR (sto.IsInsert = TRUE OR sto.IsUpdate = TRUE OR sto.IsDelete = TRUE);
+        
+        -- STEP 1: Deduplicate
+        CREATE OR REPLACE TEMP TABLE stg_dim_salesperson AS
+        SELECT *
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY BusinessEntityID ORDER BY PersonModifiedDate DESC NULLS LAST) AS rn
+            FROM stg_dim_salesperson_raw
+        )
+        WHERE rn = 1;
+        
+        -- STEP 2: Snapshot current DWH
+        CREATE OR REPLACE TEMP TABLE cur_dim_salesperson AS
+        SELECT BusinessEntityID, HashDiff
+        FROM Sales_Product_DWH.DimSalesPerson
+        WHERE IsCurrent = TRUE;
+        
+        -- STEP 3: Update old records when changed
+        UPDATE Sales_Product_DWH.DimSalesPerson dwh
+        SET 
+            IsCurrent = FALSE,
+            EndDate = stg.StartDate
+        FROM stg_dim_salesperson stg
+        WHERE dwh.BusinessEntityID = stg.BusinessEntityID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+        -- STEP 4: Insert new records
+        INSERT INTO Sales_Product_DWH.DimSalesPerson (
+            BusinessEntityID,
+            SalespersonID,
+            TerritoryKey,
+            SalesQuota,
+            Bonus,
+            CommissionPct,
+            SalesYTD,
+            SalesLastYear,
+            PersonModifiedDate,
+            StoreName,
+            StoreModifiedDate,
+            QuotaPct,
+            SalesGrowthPct,
+            EstimatedEarning,
+            IsCurrent,
+            StartDate,
+            EndDate,
+            HashDiff
+        )
+        SELECT
+            stg.BusinessEntityID,
+            stg.SalespersonID,
+            stg.TerritoryKey,
+            stg.SalesQuota,
+            stg.Bonus,
+            stg.CommissionPct,
+            stg.SalesYTD,
+            stg.SalesLastYear,
+            stg.PersonModifiedDate,
+            CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.StoreName END,
+            stg.StoreModifiedDate,
+            stg.QuotaPct,
+            stg.SalesGrowthPct,
+            stg.EstimatedEarning,
+            CASE WHEN stg.IsDeleted THEN FALSE ELSE TRUE END AS IsCurrent,
+            stg.StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+            stg.HashDiff
+        FROM stg_dim_salesperson stg
+        LEFT JOIN cur_dim_salesperson cur
+            ON stg.BusinessEntityID = cur.BusinessEntityID
+        WHERE (cur.BusinessEntityID IS NULL OR stg.HashDiff != cur.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+        -- STEP 5: Delete case
+        UPDATE Sales_Product_DWH.DimSalesPerson AS target
+        SET 
+            target.IsCurrent = FALSE,
+            target.EndDate = staging.StartDate
+        FROM stg_dim_salesperson AS staging
+        WHERE target.IsCurrent = TRUE
+          AND target.BusinessEntityID IN (
+          SELECT BusinessEntityID
+          FROM SALES.salesperson
+          WHERE IsDelete = TRUE);
+
+
+        --- UPLOAD DATA FROM CURRENCY + CURRENCY RATE
+        -- STEP 0: RAW staging
+        CREATE OR REPLACE TEMP TABLE stg_dim_currency_raw AS
+        SELECT 
+            curate.CurrencyRateID,
+            curate.CurrencyRateDate,
+            curate.FromCurrencyCode,
+            curate.ToCurrencyCode,
+            cur.Name AS ToCurrencyName,
+            curate.ModifiedDate AS CurrencyRateModifiedDate,
+            cur.ModifiedDate AS CurrencyModifiedDate,
+            curate.AverageRate,
+            curate.EndOfDayRate,
+            (curate.EndOfDayRate - curate.AverageRate) AS RateDiff,
+            CASE 
+                WHEN curate.EndOfDayRate > curate.AverageRate THEN 'Up'
+                WHEN curate.EndOfDayRate < curate.AverageRate THEN 'Down'
+                ELSE 'Stable'
+            END AS RateTrend,
+            EXTRACT(YEAR FROM curate.CurrencyRateDate) AS Year,
+            EXTRACT(MONTH FROM curate.CurrencyRateDate) AS Month,
+            CEIL(EXTRACT(MONTH FROM curate.CurrencyRateDate) / 3) AS Quarter,
+        
+            -- StartDate / EndDate
+            COALESCE(GREATEST(curate.ModifiedDate, cur.ModifiedDate),
+                     curate.ModifiedDate, cur.ModifiedDate) AS StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+        
+            -- Flags
+            CASE WHEN curate.IsDelete = TRUE OR cur.IsDelete = TRUE THEN TRUE ELSE FALSE END AS IsDeleted,
+            CASE WHEN curate.IsDelete = TRUE OR cur.IsDelete = TRUE THEN FALSE ELSE TRUE END AS IsCurrent,
+        
+            -- HashDiff
+            SHA2(
+                TO_VARCHAR(curate.CurrencyRateID) || '|' ||
+                curate.FromCurrencyCode || '|' ||
+                curate.ToCurrencyCode || '|' ||
+                cur.Name || '|' ||
+                TO_VARCHAR(curate.AverageRate) || '|' ||
+                TO_VARCHAR(curate.EndOfDayRate) || '|' ||
+                TO_VARCHAR(curate.EndOfDayRate - curate.AverageRate) || '|' ||
+                CASE 
+                    WHEN curate.EndOfDayRate > curate.AverageRate THEN 'Up'
+                    WHEN curate.EndOfDayRate < curate.AverageRate THEN 'Down'
+                    ELSE 'Stable'
+                END
+            , 256) AS HashDiff
+        
+        FROM SALES.CurrencyRate AS curate
+        LEFT JOIN SALES.Currency AS cur
+            ON curate.ToCurrencyCode = cur.CurrencyCode
+        WHERE (curate.IsInsert = TRUE OR curate.IsUpdate = TRUE OR curate.IsDelete = TRUE)
+           OR (cur.IsInsert = TRUE OR cur.IsUpdate = TRUE OR cur.IsDelete = TRUE);
+        
+        -- STEP 1: Deduplicate - lấy record mới nhất cho mỗi CurrencyRateID
+        CREATE OR REPLACE TEMP TABLE stg_dim_currency AS
+        SELECT *
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY CurrencyRateID 
+                       ORDER BY CurrencyRateModifiedDate DESC NULLS LAST
+                   ) AS rn
+            FROM stg_dim_currency_raw
+        )
+        WHERE rn = 1;
+        
+        
+        -- STEP 2: Snapshot current DWH
+        CREATE OR REPLACE TEMP TABLE cur_dim_currency AS
+        SELECT CurrencyRateID, HashDiff
+        FROM Sales_Product_DWH.DimCurrency
+        WHERE IsCurrent = TRUE;
+        
+        
+        -- STEP 3: Update old records khi có thay đổi
+        UPDATE Sales_Product_DWH.DimCurrency dwh
+        SET 
+            IsCurrent = FALSE,
+            EndDate = stg.StartDate
+        FROM stg_dim_currency stg
+        WHERE dwh.CurrencyRateID = stg.CurrencyRateID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+        
+        -- STEP 4: Insert new records
+        INSERT INTO Sales_Product_DWH.DimCurrency (
+            CurrencyRateID,
+            CurrencyRateDate,
+            FromCurrencyCode,
+            ToCurrencyCode,
+            ToCurrencyName,
+            CurrencyRateModifiedDate,
+            CurrencyModifiedDate,
+            AverageRate,
+            EndOfDayRate,
+            RateDiff,
+            RateTrend,
+            Year,
+            Month,
+            Quarter,
+            IsCurrent,
+            StartDate,
+            EndDate,
+            HashDiff
+        )
+        SELECT
+            stg.CurrencyRateID,
+            stg.CurrencyRateDate,
+            stg.FromCurrencyCode,
+            stg.ToCurrencyCode,
+            CASE WHEN stg.IsDeleted THEN 'not exist' ELSE stg.ToCurrencyName END,
+            stg.CurrencyRateModifiedDate,
+            stg.CurrencyModifiedDate,
+            stg.AverageRate,
+            stg.EndOfDayRate,
+            stg.RateDiff,
+            stg.RateTrend,
+            stg.Year,
+            stg.Month,
+            stg.Quarter,
+            CASE WHEN stg.IsDeleted THEN FALSE ELSE TRUE END,
+            stg.StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD'),
+            stg.HashDiff
+        FROM stg_dim_currency stg
+        LEFT JOIN cur_dim_currency cur
+            ON stg.CurrencyRateID = cur.CurrencyRateID
+        WHERE (cur.CurrencyRateID IS NULL OR stg.HashDiff != cur.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+        
+        -- STEP 5: Delete case
+        UPDATE Sales_Product_DWH.DimCurrency AS target
+        SET 
+            target.IsCurrent = FALSE,
+            target.EndDate = staging.StartDate
+        FROM stg_dim_currency AS staging
+        WHERE target.IsCurrent = TRUE
+          AND target.CurrencyRateID IN (
+          SELECT CurrencyRateID
+          FROM SALES.CurrencyRate
+          WHERE IsDelete = TRUE
+      );
+      
+
+        -- UPLOAD TABLE SHIPDATE
+        -- Create or replace staging table for ShipMethod
+        CREATE OR REPLACE TEMP TABLE stg_dim_shipmethod AS
+        SELECT 
+            ShipMethodID,
+            Name AS ShipMethodName,
+            ShipBase,
+            ShipRate,
+            ModifiedDate AS StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+            TRUE AS IsCurrent,
+            
+            -- Create HashDiff using SHA-256 based on relevant columns
+            SHA2(TO_VARCHAR(ShipMethodID) || '|' ||
+                 ShipMethodName || '|' ||
+                 TO_VARCHAR(ShipBase) || '|' ||
+                 TO_VARCHAR(ShipRate), 256) AS HashDiff
+        FROM PURCHASING.SHIPMETHOD
+        WHERE IsInsert = TRUE OR IsUpdate = TRUE OR IsDelete = TRUE;
+        
+        -- Step 1: Update the old records when HashDiff is different
+        UPDATE SALES_PRODUCT_DWH.DimShipMethod dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_dim_shipmethod stg
+        WHERE dwh.ShipMethodID = stg.ShipMethodID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+        -- Step 2: Insert new records into DimShipMethod 
+        INSERT INTO SALES_PRODUCT_DWH.DimShipMethod (
+            ShipMethodID,
+            ShipMethodName,
+            ShipBase,
+            ShipRate,
+            IsCurrent,
+            StartDate,
+            EndDate,
+            HashDiff
+        )
+        SELECT
+            stg.ShipMethodID,
+            stg.ShipMethodName,
+            stg.ShipBase,
+            stg.ShipRate,
+            TRUE AS IsCurrent,
+            stg.StartDate,
+            stg.EndDate,
+            stg.HashDiff
+        FROM stg_dim_shipmethod stg
+        LEFT JOIN SALES_PRODUCT_DWH.DimShipMethod dim
+            ON stg.ShipMethodID = dim.ShipMethodID
+            AND dim.IsCurrent = TRUE
+        WHERE (dim.ShipMethodID IS NULL OR stg.HashDiff != dim.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+          
+        -- Step 3: Update the deleted records
+        UPDATE SALES_PRODUCT_DWH.DimShipMethod dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_dim_shipmethod stg
+        WHERE dwh.ShipMethodID = stg.ShipMethodID
+          AND dwh.IsCurrent = TRUE
+          AND stg.IsCurrent = FALSE;
+        
+        --- TABLE SPECIALOFFER
+        -- Create or replace staging table for SpecialOffer
+        CREATE OR REPLACE TEMP TABLE stg_dim_specialoffer AS
+        SELECT 
+            so.SpecialOfferID,
+            so.Description,
+            so.DiscountPct,
+            so.Type,
+            so.ModifiedDate AS OfferModifiedDate,
+            so.Category,
+            so.OfferStartDate,
+            so.OfferEndDate,
+            so.MinQty AS MinQTY,
+            so.MaxQty AS MaxQTY,
+            DATEDIFF(day, so.OfferStartDate, so.OfferEndDate) AS OfferDurationDays,
+            RANK() OVER (PARTITION BY so.Type ORDER BY so.DiscountPct DESC) AS DiscountRankType,
+            CONCAT(ROUND(100.0 * so.DiscountPct / SUM(so.DiscountPct) OVER (), 2), '%') AS DiscountPctContribution,
+            CASE 
+                WHEN CURRENT_DATE BETWEEN so.OfferStartDate AND so.OfferEndDate THEN 'Active'
+                WHEN CURRENT_DATE < so.OfferStartDate THEN 'Upcoming'
+                ELSE 'Expired'
+            END AS OfferStatus,
+            
+            ModifiedDate AS StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+            TRUE AS IsCurrent,
+            
+            -- Generate HashDiff using SHA-256 from relevant columns
+            SHA2(
+                COALESCE(TO_VARCHAR(so.SpecialOfferID), '') || '|' ||
+                COALESCE(so.Description, '') || '|' ||
+                COALESCE(TO_VARCHAR(so.DiscountPct), '') || '|' ||
+                COALESCE(so.Type, '') || '|' ||
+                COALESCE(so.Category, '') || '|' ||
+                COALESCE(TO_VARCHAR(so.OfferStartDate), '') || '|' ||
+                COALESCE(TO_VARCHAR(so.OfferEndDate), '') || '|' ||
+                COALESCE(TO_VARCHAR(so.MinQty), '') || '|' ||
+                COALESCE(TO_VARCHAR(so.MaxQty), '')
+            , 256) AS HashDiff
+        FROM SALES.SpecialOffer AS so
+        WHERE so.IsInsert = TRUE OR so.IsUpdate = TRUE OR so.IsDelete = TRUE;
+        
+        -- Step 1: Update the old records when HashDiff is different
+        UPDATE SALES_PRODUCT_DWH.DimSpecialOffer dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_dim_specialoffer stg
+        WHERE dwh.SpecialOfferID = stg.SpecialOfferID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+        -- Step 2: Insert new records into DimSpecialOffer 
+        INSERT INTO SALES_PRODUCT_DWH.DimSpecialOffer (
+            SpecialOfferID,
+            Description,
+            DiscountPCT,
+            Type,
+            OfferModifiedDate,
+            Category,
+            OfferStartDate,
+            OfferEndDate,
+            MinQTY,
+            MaxQTY,
+            OfferDurationDays,
+            DiscountRankType,
+            DiscountPctContribution,
+            OfferStatus,
+            IsCurrent,
+            StartDate,
+            EndDate,
+            HashDiff
+        )
+        SELECT
+            stg.SpecialOfferID,
+            stg.Description,
+            stg.DiscountPct,
+            stg.Type,
+            stg.OfferModifiedDate,
+            stg.Category,
+            stg.OfferStartDate,
+            stg.OfferEndDate,
+            stg.MinQTY,
+            stg.MaxQTY,
+            stg.OfferDurationDays,
+            stg.DiscountRankType,
+            stg.DiscountPctContribution,
+            stg.OfferStatus,
+            TRUE AS IsCurrent,
+            stg.StartDate,
+            stg.EndDate,
+            stg.HashDiff
+        FROM stg_dim_specialoffer stg
+        LEFT JOIN SALES_PRODUCT_DWH.DimSpecialOffer dim
+            ON stg.SpecialOfferID = dim.SpecialOfferID
+            AND dim.IsCurrent = TRUE
+        WHERE (dim.SpecialOfferID IS NULL OR stg.HashDiff != dim.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+        
+        -- Step 3: Update the deleted records
+        UPDATE SALES_PRODUCT_DWH.DimSpecialOffer dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_dim_specialoffer stg
+        WHERE dwh.SpecialOfferID = stg.SpecialOfferID
+          AND dwh.IsCurrent = TRUE
+          AND stg.IsCurrent = FALSE;
+        
+        
+        --- LOAD DATA PRODUCT + SUBCATEGORY + CATEGORY
+        -- Create or replace staging table for Product, ProductSubcategory, and ProductCategory
+        CREATE OR REPLACE TEMP TABLE stg_dim_product AS
+        SELECT 
+            pro.ProductID,
+            pro.Name AS ProductName,
+            pro.FinishedGoodsFlag,
+            pro.Color,
+            pro.SafetyStockLevel,
+            pro.ReorderPoint,
+            pro.StandardCost,
+            pro.ListPrice,
+            pro.Size,
+            pro.Weight,
+            pro.DaysToManufacture,
+            pro.ProductLine,
+            pro.Class,
+            pro.Style,
+            prosub.ProductSubcategoryID,
+            pro.SellStartDate,
+            pro.SellEndDate,
+            pro.DiscontinuedDate,
+            procat.ProductCategoryID,
+            procat.Name AS CategoryName,
+            pro.ModifiedDate as ProductModifiedDate,
+            prosub.ModifiedDate as SubCateProModifiedDate,
+            procat.ModifiedDate as CateProModifiedDate,
+            
+            -- Tính giá trị xếp hạng theo subcategory
+            DENSE_RANK() OVER (PARTITION BY prosub.ProductSubcategoryID ORDER BY pro.ListPrice DESC) AS PriceRankInSubcategory,
+            
+            -- Tính tỷ lệ lợi nhuận
+            ROUND((pro.ListPrice - pro.StandardCost) / NULLIF(pro.StandardCost, 0) * 100, 2) AS ProfitMarginPct,
+            
+            -- Tổng sản phẩm trong category
+            COUNT(pro.ProductID) OVER (PARTITION BY procat.ProductCategoryID) AS TotalProInCate,
+            
+            -- Trung bình giá trong subcategory
+            ROUND(AVG(pro.ListPrice) OVER (PARTITION BY prosub.ProductSubcategoryID), 2) AS AvgPriceBySubcategory,
+            
+            COALESCE(GREATEST(pro.ModifiedDate, prosub.ModifiedDate, procat.ModifiedDate),
+                pro.ModifiedDate, prosub.ModifiedDate, procat.ModifiedDate) as StartDate,
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+            TRUE AS IsCurrent,
+            
+            -- Tạo HashDiff sử dụng SHA-256 từ các cột quan trọng
+            SHA2(
+                COALESCE(TO_VARCHAR(pro.ProductID), '') || '|' ||
+                COALESCE(pro.Name, '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.FinishedGoodsFlag), '') || '|' ||
+                COALESCE(pro.Color, '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.SafetyStockLevel), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.ReorderPoint), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.StandardCost), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.ListPrice), '') || '|' ||
+                COALESCE(pro.Size, '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.Weight), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.DaysToManufacture), '') || '|' ||
+                COALESCE(pro.ProductLine, '') || '|' ||
+                COALESCE(pro.Class, '') || '|' ||
+                COALESCE(pro.Style, '') || '|' ||
+                COALESCE(TO_VARCHAR(prosub.ProductSubcategoryID), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.SellStartDate), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.SellEndDate), '') || '|' ||
+                COALESCE(TO_VARCHAR(pro.DiscontinuedDate), '') || '|' ||
+                COALESCE(TO_VARCHAR(procat.ProductCategoryID), '') || '|' ||
+                COALESCE(procat.Name, '')
+            , 256) AS HashDiff
+        FROM production.product AS pro
+        LEFT JOIN production.productsubcategory AS prosub
+            ON pro.ProductSubCategoryID = prosub.ProductSubCategoryID
+        LEFT JOIN production.productcategory AS procat
+            ON prosub.ProductCategoryID = procat.ProductCategoryID
+        WHERE (pro.IsInsert = TRUE OR pro.IsUpdate = TRUE OR pro.IsDelete = TRUE)
+        OR (prosub.IsInsert = TRUE OR prosub.IsUpdate = TRUE OR prosub.IsDelete = TRUE)
+        OR (procat.IsInsert = TRUE OR procat.IsUpdate = TRUE OR procat.IsDelete = TRUE);
+        
+        -- Step 1: Update the old records when HashDiff is different
+        UPDATE SALES_PRODUCT_DWH.FactProduct dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_dim_product stg
+        WHERE dwh.ProductID = stg.ProductID
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+        -- Step 2: Insert new records into FactProduct (when HashDiff is different or does not exist)
+        INSERT INTO SALES_PRODUCT_DWH.FactProduct (
+            ProductID ,
+            ProductName ,
+            FinishedGoodsFlag ,
+            Color ,
+            SafetyStockLevel ,
+            ReorderPoint,
+            StandardCost ,
+            ListPrice ,
+            Size ,
+            Weight ,
+            DaysToManufacture ,
+            ProductLine ,
+            Class ,
+            Style ,
+            ProductModifiedDate ,
+            SubCateProModifiedDate ,
+            CateProModifiedDate ,
+            ProductSubcategoryID ,
+            ProductCategoryID,
+            CategoryName ,
+            SellStartDate ,
+            SellEndDate,
+            DiscontinuedDate,
+            PriceRankInSubcategory ,
+            ProfitMarginPct ,
+            TotalProInCate,
+            AvgPriceBySubcategory ,
+            IsCurrent ,
+            StartDate ,
+            EndDate ,
+            HashDiff 
+        )
+        SELECT
+            stg.ProductID ,
+            stg.ProductName ,
+            stg.FinishedGoodsFlag ,
+            stg.Color ,
+            stg.SafetyStockLevel ,
+            stg.ReorderPoint,
+            stg.StandardCost ,
+            stg.ListPrice ,
+            stg.Size ,
+            stg.Weight ,
+            stg.DaysToManufacture ,
+            stg.ProductLine ,
+            stg.Class ,
+            stg.Style ,
+            stg.ProductModifiedDate ,
+            stg.SubCateProModifiedDate ,
+            stg.CateProModifiedDate ,
+            stg.ProductSubcategoryID ,
+            stg.ProductCategoryID,
+            stg.CategoryName ,
+            stg.SellStartDate ,
+            stg.SellEndDate,
+            stg.DiscontinuedDate,
+            stg.PriceRankInSubcategory ,
+            stg.ProfitMarginPct ,
+            stg.TotalProInCate,
+            stg.AvgPriceBySubcategory ,
+            stg.IsCurrent ,
+            stg.StartDate ,
+            stg.EndDate ,
+            stg.HashDiff 
+        FROM stg_dim_product stg
+        LEFT JOIN SALES_PRODUCT_DWH.FactProduct dim
+            ON stg.ProductID = dim.ProductID
+            AND dim.IsCurrent = TRUE
+        WHERE (dim.ProductID IS NULL OR stg.HashDiff != dim.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+        -- Step 3: Update the deleted records
+        UPDATE SALES_PRODUCT_DWH.FactProduct dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_dim_product stg
+        WHERE dwh.ProductID = stg.ProductID
+          AND dwh.IsCurrent = TRUE
+          AND stg.IsCurrent = FALSE;
+        
+        
+        --- UPLOAD DATA TO SALESORDERREASON
+        
+        CREATE OR REPLACE TEMP TABLE stg_fact_salesorderreason AS
+        SELECT 
+            sos.SalesOrderID,
+            sr.SalesReasonID,
+            soh.SalesOrderHeaderKey,
+            sr.Name AS ReasonName,
+            sr.ReasonType,
+            sos.ModifiedDate,
+            
+            CASE 
+                WHEN sr.IsDelete THEN FALSE
+                ELSE TRUE
+            END AS IsCurrent,
+        
+            COALESCE(
+            GREATEST(sos.ModifiedDate, sr.ModifiedDate),
+                     sos.ModifiedDate, sr.ModifiedDate) AS StartDate,
+            
+            TO_TIMESTAMP('9999-12-31', 'YYYY-MM-DD') AS EndDate,
+        
+            -- Tính HashDiff SHA256 từ các cột liên quan
+            SHA2(TO_JSON(OBJECT_CONSTRUCT_KEEP_NULL(
+                'SalesOrderID', sos.SalesOrderID,
+                'ReasonName', sr.Name,
+                'ReasonType', sr.ReasonType
+            )), 256) AS HashDiff
+        
+        FROM sales_temp.SalesOrderHeaderSalesReason sos
+        LEFT JOIN sales.SalesReason sr 
+            ON sos.SalesReasonID = sr.SalesReasonID
+        LEFT JOIN sales_product_dwh.FactSalesOrderHeader soh 
+            ON sos.SalesOrderID = soh.SalesOrderID AND soh.IsCurrent = TRUE
+        WHERE sr.IsInsert = TRUE OR sr.IsUpdate = TRUE OR sr.IsDelete = TRUE;
+        
+        -- STEP 2: UPDATE
+        
+        UPDATE SALES_PRODUCT_DWH.FactSalesOrderReason dwh
+        SET 
+            IsCurrent = FALSE,
+            EndDate = stg.StartDate
+        FROM stg_fact_salesorderreason stg
+        WHERE dwh.SalesOrderID = stg.SalesOrderID
+          AND dwh.ReasonName = stg.ReasonName
+          AND dwh.IsCurrent = TRUE
+          AND dwh.HashDiff != stg.HashDiff
+          AND stg.IsCurrent = TRUE;
+        
+          
+        -- STEP 3: INSERT
+        
+        INSERT INTO SALES_PRODUCT_DWH.FactSalesOrderReason (
+            SalesOrderID,
+            SalesOrderHeaderKey,
+            ReasonName,
+            ReasonType,
+            IsCurrent,
+            StartDate,
+            EndDate,
+            HashDiff
+        )
+        SELECT
+            stg.SalesOrderID,
+            stg.SalesOrderHeaderKey,
+            stg.ReasonName,
+            stg.ReasonType,
+            TRUE,
+            stg.StartDate,
+            stg.EndDate,
+            stg.HashDiff
+        FROM stg_fact_salesorderreason stg
+        LEFT JOIN SALES_PRODUCT_DWH.FactSalesOrderReason dim
+            ON stg.SalesOrderID = dim.SalesOrderID
+            AND stg.ReasonName = dim.ReasonName
+           AND dim.IsCurrent = TRUE
+        WHERE (dim.SalesOrderID IS NULL OR stg.HashDiff != dim.HashDiff)
+          AND stg.IsCurrent = TRUE;
+        
+          
+        -- STEP 4: DELETE
+        UPDATE SALES_PRODUCT_DWH.FactSalesOrderReason dwh
+        SET 
+            dwh.IsCurrent = FALSE,
+            dwh.EndDate = stg.StartDate
+        FROM stg_fact_salesorderreason stg
+        WHERE dwh.SalesOrderID = stg.SalesOrderID
+          AND dwh.ReasonName = stg.ReasonName
+          AND dwh.IsCurrent = TRUE
+          AND stg.IsCurrent = FALSE;
+
+        RETURN 'ETL Process completed successfully';
+END;
+$$;
+
+CALL RUN_LOAD_DWH_ETL_NEXT();
+
+select *
+from SALES_PRODUCT_DWH.dimcreditcard
+
